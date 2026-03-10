@@ -1,0 +1,4 @@
+module test-shell-py (test)
+
+import shell.test (test)
+import shell-py

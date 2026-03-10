@@ -1,0 +1,11 @@
+name: shell-py
+version: 0.1.0
+homepage: https://github.com/morloclib/shell-py
+synopsis: Python implementations for shell operations
+description: Python implementations for the shell module
+category: system
+license: MIT
+author: "Zebulun Arendsee"
+maintainer: "z@morloc.io"
+github: https://github.com/morloclib/shell-py
+bug-reports: https://github.com/morloclib/shell-py
