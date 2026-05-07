@@ -276,9 +276,9 @@ def _stat_to_dict(p):
         group = str(st.st_gid)
     return {
         "size": st.st_size,
-        "mtime": st.st_mtime,
-        "atime": st.st_atime,
-        "ctime": st.st_ctime,
+        "mtime": int(st.st_mtime),
+        "atime": int(st.st_atime),
+        "ctime": int(st.st_ctime),
         "mode": stat.S_IMODE(st.st_mode),
         "uid": st.st_uid,
         "gid": st.st_gid,

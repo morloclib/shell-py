@@ -4,12 +4,6 @@ import shell
 import root-py
 
 
--- Type alias mappings
-------------------------
-
-type Py => Bytes = "int"
-
-
 -- Record type mappings
 -------------------------
 
