@@ -420,10 +420,6 @@ def morloc_capture(cmd, args):
     r = subprocess.run([cmd] + args, capture_output=True, text=True)
     return r.stdout
 
-def morloc_exec(cmd, args):
-    os.execvp(cmd, [cmd] + args)
-    return None
-
 
 # ============================================================================
 # I. Process information
