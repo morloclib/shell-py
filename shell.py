@@ -7,6 +7,8 @@ import signal
 import time
 import platform
 import fnmatch
+import re
+import sys
 
 
 # ============================================================================
@@ -396,7 +398,6 @@ def morloc_run_with(opts, cmd, args):
     try:
         r = subprocess.run(
             [cmd] + args,
-            capture_output=not merge,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT if merge else subprocess.PIPE,
             text=True,
@@ -431,105 +432,104 @@ def morloc_get_pid():
 def morloc_get_parent_pid():
     return os.getppid()
 
-def _read_proc_stat(pid):
-    try:
-        with open("/proc/{}/stat".format(pid), "r") as f:
-            parts = f.read().split()
-        comm = parts[1].strip("()")
-        state = parts[2]
-        ppid = int(parts[3])
-        nice = int(parts[18])
-        priority = int(parts[17])
-        utime = int(parts[13])
-        stime = int(parts[14])
-        virt = int(parts[22])
-        rss_pages = int(parts[23])
-        rss = rss_pages * os.sysconf("SC_PAGE_SIZE")
-        cpu_time = (utime + stime) / os.sysconf("SC_CLK_TCK")
-        return {
-            "comm": comm,
-            "state": state,
-            "ppid": ppid,
-            "nice": nice,
-            "priority": priority,
-            "virt": virt,
-            "rss": rss,
-            "cpuTime": cpu_time,
-        }
-    except (OSError, IndexError, ValueError):
-        return None
+# Process listings come from ps(1), whose POSIX fields read the same on Linux
+# and macOS, so one code path serves both. Two calls: the command name is the
+# last field of one, the full command line of the other, since either may
+# contain spaces.
+_PS_FIELDS = ["pid", "ppid", "uid", "pcpu", "pmem", "vsz", "rss", "nice", "pri", "time", "stat"]
 
-def _read_proc_status(pid):
-    info = {"uid": 0, "shared": 0}
+
+def _ps(args):
+    r = subprocess.run(["ps"] + args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    return r.stdout.splitlines()
+
+
+def _ps_seconds(text):
+    """Seconds in a ps TIME field: [[DD-]HH:]MM:SS[.ss]."""
+    days = 0
+    if "-" in text:
+        d, text = text.split("-", 1)
+        days = int(d)
+    secs = 0.0
+    for part in text.split(":"):
+        secs = secs * 60 + float(part)
+    return days * 86400 + secs
+
+
+def _ps_int(text):
     try:
-        with open("/proc/{}/status".format(pid), "r") as f:
+        return int(text)
+    except ValueError:
+        return 0  # e.g. "-" for the nice value of a real-time process
+
+
+def _shared_bytes(pid):
+    """File-backed and shared resident memory, where the platform reports it."""
+    total = 0
+    try:
+        with open("/proc/{}/status".format(pid)) as f:
             for line in f:
-                if line.startswith("Uid:"):
-                    info["uid"] = int(line.split()[1])
-                elif line.startswith("RssFile:") or line.startswith("RssShmem:"):
-                    info["shared"] += int(line.split()[1]) * 1024
+                if line.startswith(("RssFile:", "RssShmem:")):
+                    total += int(line.split()[1]) * 1024
     except OSError:
         pass
-    return info
+    return total
 
-def _read_proc_cmdline(pid):
-    try:
-        with open("/proc/{}/cmdline".format(pid), "r") as f:
-            return f.read().replace("\x00", " ").strip()
-    except OSError:
-        return ""
 
-def _build_process_info(pid):
-    ps = _read_proc_stat(pid)
-    if ps is None:
-        return None
-    status = _read_proc_status(pid)
-    cmdline = _read_proc_cmdline(pid)
+def _user_name(uid):
     try:
         import pwd as pwd_mod
-        user = pwd_mod.getpwuid(status["uid"]).pw_name
+        return pwd_mod.getpwuid(uid).pw_name
     except (ImportError, KeyError):
-        user = str(status["uid"])
-    return {
-        "pid": pid,
-        "ppid": ps["ppid"],
-        "user": user,
-        "state": ps["state"],
-        "cpuPercent": 0.0,
-        "memPercent": 0.0,
-        "virt": ps["virt"],
-        "rss": ps["rss"],
-        "shared": status["shared"],
-        "nice": ps["nice"],
-        "priority": ps["priority"],
-        "cpuTime": ps["cpuTime"],
-        "command": ps["comm"],
-        "cmdline": cmdline,
-    }
+        return str(uid)
 
-def morloc_list_processes():
+
+def _processes(pids=None):
+    """ProcessInfo records for `pids`, or for every process when None."""
+    select = ["-A"] if pids is None else ["-p", ",".join(str(p) for p in pids)]
+    cols = ["-o", ",".join(f + "=" for f in _PS_FIELDS) + ",comm="]
+    args_by_pid = {}
+    for line in _ps(select + ["-o", "pid=,args="]):
+        parts = line.split(None, 1)
+        if parts:
+            args_by_pid[int(parts[0])] = parts[1] if len(parts) > 1 else ""
     result = []
-    for entry in os.listdir("/proc"):
-        if entry.isdigit():
-            info = _build_process_info(int(entry))
-            if info is not None:
-                result.append(info)
+    for line in _ps(select + cols):
+        parts = line.split(None, len(_PS_FIELDS))
+        if len(parts) <= len(_PS_FIELDS):
+            continue
+        f = dict(zip(_PS_FIELDS, parts))
+        pid = int(f["pid"])
+        result.append({
+            "pid": pid,
+            "ppid": int(f["ppid"]),
+            "user": _user_name(int(f["uid"])),
+            "state": f["stat"],
+            "cpuPercent": float(f["pcpu"]),
+            "memPercent": float(f["pmem"]),
+            "virt": int(f["vsz"]) * 1024,
+            "rss": int(f["rss"]) * 1024,
+            "shared": _shared_bytes(pid),
+            "nice": _ps_int(f["nice"]),
+            "priority": _ps_int(f["pri"]),
+            "cpuTime": _ps_seconds(f["time"]),
+            "command": os.path.basename(parts[-1].strip()),
+            "cmdline": args_by_pid.get(pid, "").strip(),
+        })
     return result
 
+
+def morloc_list_processes():
+    return _processes()
+
 def morloc_get_process(pid):
-    info = _build_process_info(pid)
-    if info is None:
+    found = _processes([pid])
+    if not found:
         raise RuntimeError("Process {} not found".format(pid))
-    return info
+    return found[0]
 
 def morloc_process_children(pid):
-    children = []
-    for entry in os.listdir("/proc"):
-        if entry.isdigit():
-            info = _build_process_info(int(entry))
-            if info is not None and info["ppid"] == pid:
-                children.append(info)
-    return children
+    return [p for p in _processes() if p["ppid"] == pid]
 
 def morloc_kill(sig, pid):
     os.kill(pid, sig)
@@ -560,73 +560,101 @@ def morloc_hostname():
     return platform.node()
 
 def morloc_uptime():
-    try:
-        with open("/proc/uptime", "r") as f:
-            return float(f.read().split()[0])
-    except OSError:
-        return 0.0
+    if sys.platform == "darwin":
+        out = subprocess.run(["sysctl", "-n", "kern.boottime"], stdout=subprocess.PIPE, text=True).stdout
+        return time.time() - _parse_boottime(out)
+    with open("/proc/uptime", "r") as f:
+        return float(f.read().split()[0])
+
+
+def _parse_boottime(text):
+    """Seconds since the epoch from `sysctl -n kern.boottime`:
+    "{ sec = 1700000000, usec = 250000 } Tue Nov 14 ..."."""
+    m = re.search(r"sec = (\d+), usec = (\d+)", text)
+    if not m:
+        raise RuntimeError("cannot read the boot time: " + text.strip())
+    return int(m.group(1)) + int(m.group(2)) / 1e6
 
 def morloc_cpu_count():
     return os.cpu_count() or 1
 
 def morloc_mem_info():
-    info = {
-        "total": 0, "available": 0, "used": 0, "free": 0,
-        "buffers": 0, "cached": 0,
-        "swapTotal": 0, "swapUsed": 0, "swapFree": 0,
+    if sys.platform == "darwin":
+        run = lambda *a: subprocess.run(list(a), stdout=subprocess.PIPE, text=True).stdout
+        return _parse_darwin_mem(
+            int(run("sysctl", "-n", "hw.memsize")), run("vm_stat"), run("sysctl", "-n", "vm.swapusage")
+        )
+    info = {}
+    with open("/proc/meminfo", "r") as f:
+        for line in f:
+            parts = line.split()
+            info[parts[0].rstrip(":")] = int(parts[1]) * 1024  # kB to bytes
+    total, free = info.get("MemTotal", 0), info.get("MemFree", 0)
+    buffers, cached = info.get("Buffers", 0), info.get("Cached", 0)
+    swap_total, swap_free = info.get("SwapTotal", 0), info.get("SwapFree", 0)
+    return {
+        "total": total, "available": info.get("MemAvailable", free), "used": total - free - buffers - cached,
+        "free": free, "buffers": buffers, "cached": cached,
+        "swapTotal": swap_total, "swapUsed": swap_total - swap_free, "swapFree": swap_free,
     }
-    try:
-        with open("/proc/meminfo", "r") as f:
-            for line in f:
-                parts = line.split()
-                key = parts[0].rstrip(":")
-                val = int(parts[1]) * 1024  # convert kB to bytes
-                if key == "MemTotal":
-                    info["total"] = val
-                elif key == "MemAvailable":
-                    info["available"] = val
-                elif key == "MemFree":
-                    info["free"] = val
-                elif key == "Buffers":
-                    info["buffers"] = val
-                elif key == "Cached":
-                    info["cached"] = val
-                elif key == "SwapTotal":
-                    info["swapTotal"] = val
-                elif key == "SwapFree":
-                    info["swapFree"] = val
-    except OSError:
-        pass
-    info["used"] = info["total"] - info["free"] - info["buffers"] - info["cached"]
-    info["swapUsed"] = info["swapTotal"] - info["swapFree"]
-    return info
+
+
+def _parse_darwin_mem(total, vm_stat, swapusage):
+    """MemInfo from macOS's hw.memsize, `vm_stat` and vm.swapusage."""
+    page = int(re.search(r"page size of (\d+) bytes", vm_stat).group(1))
+    pages = {}
+    for line in vm_stat.splitlines()[1:]:
+        key, _, val = line.partition(":")
+        if val.strip().rstrip(".").isdigit():
+            pages[key.strip()] = int(val.strip().rstrip(".")) * page
+    free = pages.get("Pages free", 0) + pages.get("Pages speculative", 0)
+    cached = pages.get("File-backed pages", 0)
+    available = free + pages.get("Pages inactive", 0) + pages.get("Pages purgeable", 0)
+    unit = {"K": 1 << 10, "M": 1 << 20, "G": 1 << 30}
+    swap = {k: float(v) * unit[u] for k, v, u in re.findall(r"(total|used|free) = ([\d.]+)([KMG])", swapusage)}
+    return {
+        "total": total, "available": available, "used": total - available,
+        "free": free, "buffers": 0, "cached": cached,
+        "swapTotal": int(swap.get("total", 0)), "swapUsed": int(swap.get("used", 0)),
+        "swapFree": int(swap.get("free", 0)),
+    }
 
 def morloc_disk_info():
+    """Mounted filesystems, from POSIX `df -P -k` and the `mount` listing,
+    which both Linux and macOS provide."""
+    out = subprocess.run(["df", "-P", "-k"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True).stdout
+    types = _parse_mount(subprocess.run(["mount"], stdout=subprocess.PIPE, text=True).stdout)
     result = []
-    try:
-        st_out = subprocess.run(
-            ["df", "-T", "-B1", "--output=target,fstype,size,used,avail,pcent"],
-            capture_output=True, text=True,
-        )
-        for line in st_out.stdout.strip().split("\n")[1:]:
-            parts = line.split()
-            if len(parts) >= 6:
-                pct_str = parts[5].rstrip("%")
-                try:
-                    pct = float(pct_str)
-                except ValueError:
-                    pct = 0.0
-                result.append({
-                    "mountPoint": parts[0],
-                    "fsType": parts[1],
-                    "total": int(parts[2]),
-                    "used": int(parts[3]),
-                    "free": int(parts[4]),
-                    "usagePercent": pct,
-                })
-    except (OSError, subprocess.SubprocessError):
-        pass
+    for line in out.splitlines()[1:]:
+        parts = line.split(None, 5)
+        if len(parts) < 6:
+            continue
+        mount = parts[5]
+        try:
+            pct = float(parts[4].rstrip("%"))
+        except ValueError:
+            pct = 0.0
+        result.append({
+            "mountPoint": mount,
+            "fsType": types.get(mount, ""),
+            "total": int(parts[1]) * 1024,
+            "used": int(parts[2]) * 1024,
+            "free": int(parts[3]) * 1024,
+            "usagePercent": pct,
+        })
     return result
+
+
+def _parse_mount(text):
+    """Mount point -> filesystem type from `mount` output, in either the
+    Linux form "dev on /path type ext4 (rw,...)" or the macOS form
+    "dev on /path (apfs, local, ...)"."""
+    types = {}
+    for line in text.splitlines():
+        m = re.match(r".+? on (.+) type (\S+) \(", line) or re.match(r".+? on (.+) \(([^,)]+)", line)
+        if m:
+            types[m.group(1)] = m.group(2)
+    return types
 
 def morloc_load_avg():
     load1, load5, load15 = os.getloadavg()
