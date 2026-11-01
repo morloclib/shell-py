@@ -8,6 +8,7 @@ import root-py
 -------------------------
 
 record Py => FileStat = "dict"
+record Py => FileInfo = "dict"
 record Py => ProcessResult = "dict"
 record Py => ProcessInfo = "dict"
 record Py => MemInfo = "dict"
@@ -70,6 +71,7 @@ source Py from "shell.py"
     , "morloc_write_bytes" as writeBytes
     , "morloc_read_head" as readHead
     , "morloc_stat" as stat
+    , "morloc_lstat_info" as lstatInfo
     , "morloc_file_size" as fileSize
     , "morloc_path_exists" as pathExists
     , "morloc_is_file" as isFile
@@ -117,3 +119,11 @@ sigCONT = 18
 sigUSR1 = 10
 sigUSR2 = 12
 sigALRM = 14
+
+
+-- File status
+----------------
+
+lstatInfo :: Path -> <IO> FileInfo
+
+fileInfo p = @try (lstatInfo p)

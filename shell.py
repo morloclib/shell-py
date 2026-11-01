@@ -295,6 +295,30 @@ def _stat_to_dict(p):
 def morloc_stat(p):
     return _stat_to_dict(p)
 
+_FILE_KINDS = (stat.S_ISREG, stat.S_ISDIR, stat.S_ISLNK, stat.S_ISFIFO, stat.S_ISSOCK, stat.S_ISCHR, stat.S_ISBLK)
+
+def morloc_lstat_info(p):
+    try:
+        st = os.lstat(p)
+    except (OSError, ValueError) as e:
+        raise RuntimeError("cannot read the status of {!r}: {}".format(p, getattr(e, "strerror", None) or e))
+    kind = next((i for i, test in enumerate(_FILE_KINDS) if test(st.st_mode)), None)
+    if kind is None:
+        raise RuntimeError("{!r} has an unknown file type {:o}".format(p, stat.S_IFMT(st.st_mode)))
+    return {
+        "kind": kind,
+        "size": st.st_size,
+        "allocated": st.st_blocks * 512,
+        "mode": stat.S_IMODE(st.st_mode),
+        "uid": st.st_uid,
+        "gid": st.st_gid,
+        "nlinks": st.st_nlink,
+        "device": st.st_dev,
+        "inode": st.st_ino,
+        "mtime": st.st_mtime_ns // 1000,
+        "ctime": st.st_ctime_ns // 1000,
+    }
+
 def morloc_file_size(p):
     return os.path.getsize(p)
 
