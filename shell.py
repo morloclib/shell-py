@@ -10,6 +10,8 @@ import fnmatch
 import re
 import sys
 
+from mlc_types.shell import FileKind
+
 
 # ============================================================================
 # A. Pure path operations
@@ -306,7 +308,7 @@ def morloc_lstat_info(p):
     if kind is None:
         raise RuntimeError("{!r} has an unknown file type {:o}".format(p, stat.S_IFMT(st.st_mode)))
     return {
-        "kind": kind,
+        "kind": FileKind(kind),
         "size": st.st_size,
         "allocated": st.st_blocks * 512,
         "mode": stat.S_IMODE(st.st_mode),
