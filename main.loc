@@ -119,11 +119,3 @@ sigCONT = 18
 sigUSR1 = 10
 sigUSR2 = 12
 sigALRM = 14
-
-
--- File status
-----------------
-
-lstatInfo :: Path -> <IO> FileInfo
-
-fileInfo p = @try (lstatInfo p)
